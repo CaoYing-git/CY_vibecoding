@@ -1,0 +1,21 @@
+# ── cyprof default configuration ──────────────────────────────
+#  This file ships to /etc/cyprof/cyprof.yaml
+#  Every key can be overridden via environment variable (see README).
+
+collector:
+  frequency_hz: 11         # per-CPU samples per second
+  duration_sec: 10          # how long each perf-record window lasts
+  callgraph: true           # --call-graph dwarf (fp fallback)
+  perf_path: perf           # path to perf binary
+  extra_args: []            # extra flags forwarded to perf record
+
+storage:
+  data_dir: /var/lib/cyprof/data
+  db_path: /var/lib/cyprof/metadata.db
+  max_size_mb: 500          # hard storage cap
+  max_age_hours: 24         # oldest record to keep
+  comp_level: 3             # zstd level (1=fastest, 19=smallest)
+
+daemon:
+  sample_interval_sec: 60   # time between sampling windows
+  health_check_sec: 30      # health heartbeat interval
