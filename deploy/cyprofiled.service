@@ -1,0 +1,54 @@
+[Unit]
+Description=cyprofiled — Linux continuous CPU profiling daemon
+Documentation=https://github.com/CaoYing-git/CY_vibecoding
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+
+# ── execution ──────────────────────────────────────────────────
+ExecStart=/usr/bin/cyprofiled --config /etc/cyprof/cyprof.yaml
+ExecStop=/bin/kill -TERM $MAINPID
+
+# ── security hardening ─────────────────────────────────────────
+User=root
+Group=root
+# perf requires CAP_PERFMON (Linux 5.8+) or CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_PERFMON CAP_SYS_ADMIN
+AmbientCapabilities=CAP_PERFMON CAP_SYS_ADMIN
+
+# ── resource limits ────────────────────────────────────────────
+CPUQuota=50%
+MemoryMax=128M
+MemoryHigh=96M
+TasksMax=8
+IOAccounting=true
+IOWriteBandwidthMax=/var/lib/cyprof 5M
+IOReadBandwidthMax=/var/lib/cyprof 10M
+
+# ── filesystem protection ──────────────────────────────────────
+ReadWritePaths=/var/lib/cyprof
+ReadOnlyPaths=/usr/bin/perf
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# ── lifecycle ──────────────────────────────────────────────────
+WatchdogSec=30
+Restart=always
+RestartSec=10s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# ── logging ────────────────────────────────────────────────────
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cyprofiled
+
+[Install]
+WantedBy=multi-user.target
