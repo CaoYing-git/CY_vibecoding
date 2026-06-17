@@ -218,3 +218,110 @@ def test_cleanup_removes_file(tmp_path: Path):
 def test_cleanup_noop_on_missing(tmp_path: Path):
     p = tmp_path / "missing"
     PerfCollector._cleanup(p)  # should not raise
+
+
+def test_cleanup_oserror_caught(tmp_path: Path, monkeypatch):
+    """_cleanup should not raise even when unlink fails."""
+    p = tmp_path / "doomed"
+    p.write_text("x")
+    with mock.patch.object(Path, "unlink", side_effect=OSError("permission denied")):
+        PerfCollector._cleanup(p)  # should not raise
+
+
+# ── collect(): no-zstd (direct-to-file) path ─────────────────────
+
+def test_collect_no_zstd_success(collector: PerfCollector):
+    """When zstd is unavailable, perf writes directly to a temp file."""
+    collector._has_zstd = False  # force direct-to-file mode
+
+    with mock.patch("subprocess.run") as m_run:
+        m_run.return_value = mock.MagicMock(returncode=0, stderr=b"")
+
+        with mock.patch.object(collector, "_build_cmd", return_value=["mock-perf", "record"]):
+            with mock.patch.object(collector, "_make_filename", return_value="test.perf.data"):
+                with mock.patch.object(Path, "exists", return_value=True):
+                    with mock.patch.object(Path, "rename"):
+                        with mock.patch.object(Path, "stat") as m_stat:
+                            m_stat.return_value.st_size = 5000
+                            result = collector.collect()
+                            assert result is not None
+                            assert result.exit_code == 0
+
+
+def test_collect_timeout(collector: PerfCollector):
+    """subprocess.TimeoutExpired returns None."""
+    collector._has_zstd = False
+    with mock.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("perf", 120)):
+        with mock.patch.object(collector, "_build_cmd", return_value=["mock"]):
+            with mock.patch.object(collector, "_make_filename", return_value="test"):
+                result = collector.collect()
+                assert result is None
+
+
+def test_collect_perf_nonzero_exit(collector: PerfCollector):
+    """perf exiting with non-zero code should still produce a result (just logged)."""
+    collector._has_zstd = False
+    with mock.patch("subprocess.run") as m_run:
+        m_run.return_value = mock.MagicMock(
+            returncode=1,
+            stderr=b"[ perf record: Captured and wrote 0.050 MB perf.data (42 samples) ]",
+        )
+        with mock.patch.object(collector, "_build_cmd", return_value=["mock"]):
+            with mock.patch.object(collector, "_make_filename", return_value="test.perf.data"):
+                with mock.patch.object(Path, "exists", return_value=True):
+                    with mock.patch.object(Path, "rename"):
+                        with mock.patch.object(Path, "stat") as m_stat:
+                            m_stat.return_value.st_size = 5000
+                            result = collector.collect()
+                            assert result is not None
+                            assert result.exit_code == 1  # non-zero, but data exists
+
+
+def test_collect_unexpected_exception(collector: PerfCollector):
+    """Arbitrary exceptions during collection (inside try block) return None."""
+    with mock.patch.object(collector, "_build_cmd", return_value=["mock-perf"]):
+        with mock.patch.object(collector, "_make_filename", return_value="test"):
+            # Inject exception into the try block by breaking subprocess
+            collector._has_zstd = False
+            with mock.patch("subprocess.run", side_effect=RuntimeError("boom")):
+                result = collector.collect()
+                assert result is None
+
+
+def test_collect_zstd_nonzero_keeps_tmp(collector: PerfCollector):
+    """When zstd exits non-zero, tmp file is kept for diagnostics."""
+    collector._has_zstd = True
+
+    with mock.patch("subprocess.Popen") as mp:
+        mp_perf = mock.MagicMock()
+        mp_perf.stdout = mock.MagicMock()
+        mp_perf.stderr.read.return_value = b"perf ok"
+        mp_perf.wait.return_value = 0
+
+        mp_zstd = mock.MagicMock()
+        mp_zstd.stderr.read.return_value = b"zstd crash"
+        mp_zstd.wait.return_value = 1  # failure
+        mp.side_effect = [mp_perf, mp_zstd]
+
+        with mock.patch.object(collector, "_build_cmd", return_value=["mock"]):
+            with mock.patch.object(collector, "_make_filename", return_value="test.zst"):
+                with mock.patch.object(Path, "rename") as m_rename:
+                    result = collector.collect()
+                    assert result is None
+                    # tmp file should NOT be renamed to final
+                    m_rename.assert_not_called()
+
+
+def test_collect_file_size_zero_after_rename(collector: PerfCollector):
+    """When file is 0 bytes after rename, it's cleaned up."""
+    collector._has_zstd = False
+    with mock.patch("subprocess.run") as m_run:
+        m_run.return_value = mock.MagicMock(returncode=0, stderr=b"")
+        with mock.patch.object(collector, "_build_cmd", return_value=["mock"]):
+            with mock.patch.object(collector, "_make_filename", return_value="test.perf.data"):
+                with mock.patch.object(Path, "rename"):
+                    with mock.patch.object(Path, "exists", return_value=True):
+                        with mock.patch.object(Path, "stat") as m_stat:
+                            m_stat.return_value.st_size = 0  # empty
+                            result = collector.collect()
+                            assert result is None

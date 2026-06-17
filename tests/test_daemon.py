@@ -270,3 +270,44 @@ def test_interruptible_sleep_stops_midway(daemon: Daemon):
     t.join()
     elapsed = time.time() - t0
     assert elapsed < 2.0  # should exit well before 10s
+
+
+def test_shutdown(daemon: Daemon):
+    """shutdown() sets _running=False."""
+    daemon._running = True
+    daemon.shutdown()
+    assert daemon._running is False
+
+
+def test_sd_notify_no_systemd(monkeypatch):
+    """_sd_notify is a no-op when NOTIFY_SOCKET is empty."""
+    monkeypatch.setenv("NOTIFY_SOCKET", "")
+    # should not raise
+    from cyprof.daemon import _sd_notify
+    _sd_notify("READY=1")
+
+
+def test_write_health_file_oserror(daemon: Daemon, monkeypatch):
+    """_write_status survives OSError during health file write."""
+    daemon._running = True
+    with mock.patch.object(daemon, "_health_path") as m_path:
+        m_path.with_suffix.side_effect = OSError("disk full")
+        daemon._write_status()  # should not raise
+
+
+def test_run_sleeps_between_ticks(daemon: Daemon, mock_result: CollectResult):
+    """run() calls _interruptible_sleep between ticks."""
+    tick_count = [0]
+
+    def fake_tick():
+        tick_count[0] += 1
+        if tick_count[0] >= 1:
+            daemon.shutdown()
+
+    with mock.patch.object(PerfCollector, "has_perf",
+                           new_callable=mock.PropertyMock, return_value=True):
+        with mock.patch.object(daemon._collector, "collect", return_value=mock_result):
+            with mock.patch.object(daemon, "_tick", side_effect=fake_tick):
+                with mock.patch.object(daemon, "_interruptible_sleep") as m_sleep:
+                    daemon.run()
+                    assert m_sleep.called

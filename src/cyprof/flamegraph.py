@@ -274,7 +274,9 @@ def _estimate_sample_count(folded_text: str) -> int:
         parts = line.rsplit(None, 1)  # split on last whitespace
         if len(parts) == 2:
             try:
-                total += int(parts[1])
+                count = int(parts[1])
+                if count > 0:
+                    total += count
             except ValueError:
                 pass
     return total

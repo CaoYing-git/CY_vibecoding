@@ -277,3 +277,70 @@ def test_properties_populated(engine: QueryEngine):
     assert engine.newest is not None
     assert engine.oldest is not None
     assert engine.newest.start_ts >= engine.oldest.start_ts
+
+
+# ── flamegraph error handling ───────────────────────────────────
+
+def test_generate_flamegraph_handles_error(engine: QueryEngine, tmp_path: Path):
+    """When FlameGraphGenerator raises, generate_flamegraph returns None."""
+    base = time.time()
+    _make_record(engine._store, base, file_path="test.zst")
+
+    result = QueryResult(
+        records=engine._store.query(),
+        target_time=datetime.fromtimestamp(base, tz=timezone.utc),
+        time_range=None,
+        match_method="closest",
+    )
+
+    with mock.patch.object(engine._flamegraph, "generate",
+                           side_effect=__import__("cyprof.flamegraph").flamegraph.FlameGraphError("boom")):
+        fg = engine.generate_flamegraph(result, tmp_path / "out")
+        assert fg is None
+
+
+# ── parse_time edge cases ───────────────────────────────────────
+
+def test_parse_time_time_only_invalid():
+    with pytest.raises(ValueError, match="Cannot parse"):
+        parse_time("abc")
+
+
+def test_parse_time_empty():
+    with pytest.raises(ValueError, match="Cannot parse"):
+        parse_time("")
+
+
+def test_parse_time_partial():
+    """Partial match like '14' should fail — not enough for time-only."""
+    with pytest.raises(ValueError, match="Cannot parse"):
+        parse_time("14")
+
+
+# ── generate_flamegraph: all match_methods ──────────────────────
+
+def test_generate_flamegraph_no_subtitle(engine: QueryEngine, tmp_path: Path):
+    """When there's no target_time and no time_range, subtitle is empty."""
+    base = time.time()
+    _make_record(engine._store, base, file_path="test.zst")
+
+    # simulate an "all" match method (or any without time context)
+    result = QueryResult(
+        records=engine._store.query(),
+        target_time=None,
+        time_range=None,
+        match_method="all",
+    )
+    out_dir = tmp_path / "flame_out"
+    with mock.patch.object(engine._flamegraph, "generate") as m_gen:
+        from cyprof.flamegraph import FlameGraphResult
+        m_gen.return_value = FlameGraphResult(
+            svg_path=out_dir / "flamegraph.svg",
+            title="Test",
+            sample_count=42,
+            input_files=1,
+        )
+        fg = engine.generate_flamegraph(result, out_dir)
+        assert fg is not None
+        kwargs = m_gen.call_args.kwargs
+        assert kwargs["subtitle"] == ""

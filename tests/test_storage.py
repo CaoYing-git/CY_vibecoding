@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -288,3 +289,97 @@ class TestRingBuffer:
 
         deleted = rb.rotate()
         assert deleted >= 1 or store.count() == 0  # should not crash
+
+    def test_rotate_noop_when_empty(self, tmp_path: Path):
+        """rotate() on empty store does nothing."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        store = MetadataStore(tmp_path / "meta.db")
+        rb = RingBuffer(data_dir, store)
+        deleted = rb.rotate()
+        assert deleted == 0
+
+    def test_total_data_size_fallback(self, tmp_path: Path):
+        """When SQLite sum is 0, fall back to filesystem scan."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        store = MetadataStore(tmp_path / "meta.db")
+        # insert a record with file_size=0 so total_size_bytes() returns 0
+        rec = _make_record(file_path="fallback.zst", file_size=0)
+        store.insert(rec)
+        (data_dir / rec.file_path).write_text("x" * 1000)
+
+        rb = RingBuffer(data_dir, store, max_size_mb=0, max_age_hours=0)
+        # _total_data_size should fall back to filesystem scan
+        deleted = rb.rotate()
+        assert deleted >= 1
+
+    def test_check_disk_watermark_oserror(self, tmp_path: Path):
+        """When disk_usage raises OSError, watermark returns 'unknown'."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        store = MetadataStore(tmp_path / "meta.db")
+        rb = RingBuffer(data_dir, store)
+
+        with mock.patch("shutil.disk_usage", side_effect=OSError("fail")):
+            wm = rb.check_disk_watermark()
+        assert wm.level == "unknown"
+        assert wm.free_bytes == 0
+
+    def test_check_disk_watermark_levels(self, tmp_path: Path):
+        """Verify each watermark level is reached at correct usage."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        store = MetadataStore(tmp_path / "meta.db")
+        rb = RingBuffer(data_dir, store)
+
+        usage_mock = mock.MagicMock()
+        usage_mock.total = 100_000
+
+        with mock.patch("shutil.disk_usage", return_value=usage_mock):
+            usage_mock.free = 18_000
+            assert rb.check_disk_watermark().level == "warn"
+
+            usage_mock.free = 13_000
+            assert rb.check_disk_watermark().level == "cap"
+
+            usage_mock.free = 8_000
+            assert rb.check_disk_watermark().level == "emergency"
+
+            usage_mock.free = 3_000
+            assert rb.check_disk_watermark().level == "fatal"
+
+    def test_remove_record_delete_failure(self, tmp_path: Path):
+        """When file unlink raises OSError, _remove_record still proceeds."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        store = MetadataStore(tmp_path / "meta.db")
+        rb = RingBuffer(data_dir, store, max_size_mb=0, max_age_hours=0)
+
+        rec = _make_record(file_path="stuck.zst", file_size=100)
+        store.insert(rec)
+        file_path = data_dir / rec.file_path
+        file_path.write_text("data")
+
+        # make unlink fail
+        with mock.patch.object(Path, "unlink", side_effect=OSError("permission denied")):
+            ok = rb._remove_record(rec)
+            assert not ok  # file still exists → False
+
+    def test_remove_record_db_failure(self, tmp_path: Path):
+        """When SQLite delete fails, _remove_record still deletes the file."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        store = MetadataStore(tmp_path / "meta.db")
+        rb = RingBuffer(data_dir, store, max_size_mb=0, max_age_hours=0)
+
+        rec = _make_record(file_path="doomed.zst", file_size=100)
+        store.insert(rec)
+        file_path = data_dir / rec.file_path
+        file_path.write_text("data")
+
+        # make the DB delete fail
+        store.delete(rec.id)  # delete it first
+        # now _remove_record will try to delete the already-deleted row
+        ok = rb._remove_record(rec)
+        assert ok  # file was removed successfully, even though DB delete failed

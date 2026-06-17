@@ -267,3 +267,82 @@ def test_render_method(gen: FlameGraphGenerator, sample_folded: str, sample_svg:
     with mock.patch.object(gen, "_run_cmd", return_value=sample_svg):
         result = gen.render(sample_folded, title="Test")
         assert "<svg>" in result
+
+
+# ── edge cases ──────────────────────────────────────────────────
+
+def test_zst_decompress_failure(gen: FlameGraphGenerator, tmp_path: Path):
+    """When zstd decompress fails, FlameGraphError is raised."""
+    data = tmp_path / "bad.perf.data.zst"
+    data.write_text("corrupt")
+
+    with mock.patch("subprocess.Popen") as mp:
+        mp_zstd = mock.MagicMock()
+        mp_zstd.stdout = mock.MagicMock()
+        mp_zstd.wait.return_value = 1  # zstd failure
+        mp_zstd.stderr.read.return_value = b"corrupted data"
+
+        mp_perf = mock.MagicMock()
+        mp_perf.communicate.return_value = (b"", b"")
+        mp_perf.returncode = 0
+        mp.side_effect = [mp_zstd, mp_perf]
+
+        with pytest.raises(FlameGraphError, match="decompress"):
+            gen.generate([data], tmp_path / "out")
+
+
+def test_perf_script_nonzero_exit_raises(gen: FlameGraphGenerator, tmp_path: Path):
+    """perf script non-zero exit raises FlameGraphError."""
+    data = tmp_path / "perf.data"
+    data.write_text("dummy")
+
+    with mock.patch("subprocess.run") as m_run:
+        m_run.return_value = mock.MagicMock(
+            returncode=1,
+            stdout=b"",
+            stderr=b"perf warning",
+        )
+        with pytest.raises(FlameGraphError, match="perf script"):
+            gen.generate([data], tmp_path / "out")
+
+
+def test_run_cmd_file_not_found(gen: FlameGraphGenerator, tmp_path: Path):
+    """_run_cmd raises FlameGraphError on FileNotFoundError."""
+    data = tmp_path / "perf.data"
+    data.write_text("dummy")
+
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError("perf not installed")):
+        with pytest.raises(FlameGraphError, match="not found"):
+            gen.generate([data], tmp_path / "out")
+
+
+def test_folded_mixed_content():
+    """Sample count estimation handles mixed valid/invalid lines."""
+    text = "func1;func2 10\nbroken line\nfunc3 20\n\n  \n"
+    from cyprof.flamegraph import _estimate_sample_count
+    assert _estimate_sample_count(text) == 30
+
+
+def test_folded_negative_count():
+    """Negative counts are skipped (shouldn't happen, but be safe)."""
+    from cyprof.flamegraph import _estimate_sample_count
+    assert _estimate_sample_count("func -5\n") == 0
+
+
+def test_flamegraph_escapes_title(gen: FlameGraphGenerator, tmp_path: Path):
+    """Title with single quotes gets escaped for shell."""
+    data = tmp_path / "perf.data"
+    data.write_text("dummy")
+
+    with mock.patch.object(gen, "_run_cmd") as m_run:
+        m_run.side_effect = ["stacks\n", "collapsed\n", "<svg></svg>"]
+        gen.generate([data], tmp_path / "out", title="CPU's Flame Graph")
+        # just ensure no crash with special chars
+        assert m_run.call_count == 3
+
+
+def test_run_cmd_binary_not_found(gen: FlameGraphGenerator):
+    """_run_cmd raises FlameGraphError when binary isn't on PATH."""
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError("cmd not found")):
+        with pytest.raises(FlameGraphError, match="not found"):
+            gen._run_cmd(["nonexistent_binary"], desc="test")
